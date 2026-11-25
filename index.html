@@ -122,6 +122,7 @@
   <button id="btnExport">下載 Markdown</button>
   <button id="btnCopy">複製全部</button>
   <button id="btnClear">清除本場</button>
+  <span class="mute" style="align-self:center">版本 2026-11-25c</span>
 </div>
 
 <script>
@@ -362,7 +363,14 @@ let sumCtrl = null;
 $('btnSum').onclick = async ()=>{
   if(sumCtrl){ sumCtrl.abort(); return; }          // 彙整中再按一次 = 取消
   if(listening) stopRec();
-  if(!S.segs.length){ $('err').textContent='還沒有內容'; return; }
+  const box0 = $('sumProgress'); box0.style.display='block';
+  box0.scrollIntoView({behavior:'smooth', block:'center'});
+  if(!S.segs.length){
+    box0.innerHTML = `⚠ <b>還沒有任何字幕可以彙整。</b><br>
+      <span class="mute">請先按「開始聆聽」，確認上方音量條會隨聲音跳動、畫面有出現文字，再按「結束並彙整」。
+      若字幕是在別台裝置錄的，要在同一台裝置上彙整。</span>`;
+    return;
+  }
   $('err').textContent='';
   const mode = $('mode').value;
   const transcript = S.segs.map(g=>`[${g.time}]${LANG_NAME[g.lang]?'（'+LANG_NAME[g.lang]+'）':''} ${g.en}`).join('\n');
