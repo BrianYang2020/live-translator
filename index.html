@@ -39,6 +39,8 @@
   #summary ul{padding-left:20px}
   .bar{position:fixed;left:0;right:0;bottom:0;background:var(--bg);border-top:1px solid var(--line);padding:10px 14px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
   .err{color:#dc2626;font-size:13px}
+  #sumProgress{display:none;background:var(--card);border:1px solid var(--acc);border-radius:12px;padding:10px 14px;margin-top:16px;font-size:15px}
+  .mute{color:var(--mute);font-size:13px}
   .langs{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
   .langs button{border:0;border-radius:0;padding:8px 11px}
   .langs button.on{background:var(--ink);color:var(--bg);font-weight:600}
@@ -105,6 +107,7 @@
 
 <div id="segs"></div>
 <div class="seg" id="live" style="display:none"><div class="t">辨識中⋯</div><div class="en" id="liveEn"></div></div>
+<div id="sumProgress"></div>
 <div id="summary"></div>
 </main>
 
@@ -187,22 +190,57 @@ function scrollBottom(force){
 }
 
 // ---------- Claude API ----------
-async function claude(model, system, user, maxTokens){
-  const key = $('apiKey').value.trim();
-  if(!key) throw new Error('請先在設定填入 API Key');
-  const r = await fetch('https://api.anthropic.com/v1/messages',{
-    method:'POST',
-    headers:{'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01',
-             'anthropic-dangerous-direct-browser-access':'true'},
-    body: JSON.stringify({model, max_tokens:maxTokens, system, messages:[{role:'user',content:user}]})
-  });
-  const j = await r.json();
-  if(!r.ok) throw new Error(j.error?.message || ('HTTP '+r.status));
+function addCost(model, inTok, outTok){
   const p = PRICE[model] || [0,0];
-  const c = (j.usage.input_tokens*p[0] + j.usage.output_tokens*p[1])/1e6;
+  const c = (inTok*p[0] + outTok*p[1])/1e6;
   S.cost += c;
   try{ localStorage.setItem(monthKey(), ((+localStorage.getItem(monthKey())||0)+c).toString()); }catch(e){}
-  return j.content.map(b=>b.text||'').join('').trim();
+}
+// opts: {timeoutMs, signal, onText}；有 onText 就用串流，邊收邊回報
+async function claude(model, system, user, maxTokens, opts={}){
+  const key = $('apiKey').value.trim();
+  if(!key) throw new Error('請先在設定填入 API Key');
+  const ctrl = new AbortController();
+  const timer = opts.timeoutMs ? setTimeout(()=>ctrl.abort('timeout'), opts.timeoutMs) : null;
+  if(opts.signal) opts.signal.addEventListener('abort', ()=>ctrl.abort('cancel'));
+  const stream = !!opts.onText;
+  try{
+    const r = await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST', signal: ctrl.signal,
+      headers:{'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01',
+               'anthropic-dangerous-direct-browser-access':'true'},
+      body: JSON.stringify({model, max_tokens:maxTokens, system, stream, messages:[{role:'user',content:user}]})
+    });
+    if(!r.ok){ let m='HTTP '+r.status; try{ m=(await r.json()).error?.message||m }catch(e){} throw new Error(m); }
+    if(!stream){
+      const j = await r.json();
+      addCost(model, j.usage.input_tokens, j.usage.output_tokens);
+      return j.content.map(b=>b.text||'').join('').trim();
+    }
+    // 串流：逐段讀 SSE
+    const rd = r.body.getReader(), dec = new TextDecoder();
+    let buf='', text='', inTok=0, outTok=0;
+    while(true){
+      const {done, value} = await rd.read(); if(done) break;
+      buf += dec.decode(value, {stream:true});
+      let i;
+      while((i = buf.indexOf('\n\n')) >= 0){
+        const ev = buf.slice(0,i); buf = buf.slice(i+2);
+        const line = ev.split('\n').find(l=>l.startsWith('data:')); if(!line) continue;
+        let d; try{ d = JSON.parse(line.slice(5)); }catch(e){ continue; }
+        if(d.type==='message_start') inTok = d.message?.usage?.input_tokens||0;
+        else if(d.type==='content_block_delta' && d.delta?.text){ text += d.delta.text; opts.onText(text); }
+        else if(d.type==='message_delta') outTok = d.usage?.output_tokens||outTok;
+        else if(d.type==='error') throw new Error(d.error?.message||'串流錯誤');
+      }
+    }
+    addCost(model, inTok, outTok);
+    return text.trim();
+  }catch(e){
+    if(ctrl.signal.aborted) throw new Error(ctrl.signal.reason==='timeout' ? '等太久沒有回應（逾時）' : '已取消');
+    if(e instanceof TypeError) throw new Error('網路連線失敗，請確認網路後再試');
+    throw e;
+  }finally{ clearTimeout(timer); }
 }
 
 function translate(seg){
@@ -219,7 +257,7 @@ ${mixRule()}
 ${gl?'主題與專有名詞：'+gl:''}`;
   const user = (ctx?`【前文，僅供理解，不要翻】${ctx}\n\n`:'') + `【請翻譯這段】${seg.en}`;
   queue = queue.then(async()=>{
-    try{ seg.zh = await claude($('mTrans').value, sys, user, 600); seg.err=null; }
+    try{ seg.zh = await claude($('mTrans').value, sys, user, 600, {timeoutMs:30000}); seg.err=null; }
     catch(e){ seg.err = e.message; $('err').textContent = e.message; }
     save(); render(); scrollBottom();
   });
@@ -277,10 +315,12 @@ function stopRec(){
 $('btnRec').onclick = ()=> listening?stopRec():startRec();
 
 // ---------- summary ----------
+let sumCtrl = null;
 $('btnSum').onclick = async ()=>{
+  if(sumCtrl){ sumCtrl.abort(); return; }          // 彙整中再按一次 = 取消
   if(listening) stopRec();
-  await queue;
   if(!S.segs.length){ $('err').textContent='還沒有內容'; return; }
+  $('err').textContent='';
   const mode = $('mode').value;
   const transcript = S.segs.map(g=>`[${g.time}]${LANG_NAME[g.lang]?'（'+LANG_NAME[g.lang]+'）':''} ${g.en}`).join('\n');
   const modeHint = mode==='meeting' ? '這是一場會議討論。' : mode==='talk' ? '這是一場演講／研討會。' :
@@ -309,10 +349,36 @@ ${$('glossary').value.trim()?'主題與專有名詞：'+$('glossary').value.trim
 
 原始逐字稿：
 ${transcript}`;
-  $('btnSum').disabled=true; $('btnSum').textContent='彙整中⋯';
-  try{ S.summary = await claude($('mSum').value, sys, user, 6000); save(); render(); $('summary').scrollIntoView({behavior:'smooth'}); }
-  catch(e){ $('err').textContent='彙整失敗：'+e.message; }
-  $('btnSum').disabled=false; $('btnSum').textContent='結束並彙整';
+  // ---- 進度顯示 ----
+  const model = $('mSum').value, t0 = Date.now(), chars = transcript.length;
+  let got = 0, phase = '已送出，等待 Claude 開始回覆';
+  const box = $('sumProgress');
+  const paint = ()=>{
+    const s = Math.round((Date.now()-t0)/1000);
+    box.style.display='block';
+    box.innerHTML = `<b>彙整中⋯</b> 已經過 <b>${s}</b> 秒<br>
+      ${phase}${got?`，已收到 <b>${got}</b> 字`:''}<br>
+      <span class="mute">模型：${model}｜原稿 ${S.segs.length} 段、約 ${chars} 字。通常 20–90 秒，逐字稿越長越久。再按一次按鈕可取消。</span>`;
+  };
+  paint(); const tick = setInterval(paint, 1000);
+  box.scrollIntoView({behavior:'smooth', block:'center'});
+  sumCtrl = new AbortController();
+  $('btnSum').textContent='取消彙整'; $('btnSum').className='rec';
+  S.summary = ''; render();
+  try{
+    S.summary = await claude(model, sys, user, 6000, {signal:sumCtrl.signal, timeoutMs:300000, onText:txt=>{
+      got = txt.length; phase = '正在寫出彙整內容（下方即時顯示）';
+      $('summary').style.display='block'; $('summary').innerHTML = md(txt);
+    }});
+    save(); render();
+    box.innerHTML = `✅ 彙整完成，共花 ${Math.round((Date.now()-t0)/1000)} 秒`;
+    $('summary').scrollIntoView({behavior:'smooth'});
+  }catch(e){
+    box.innerHTML = `❌ 彙整沒有完成：${esc(e.message)}<br><span class="mute">逐字稿都還在，可以直接再按「結束並彙整」重試。</span>`;
+    if(!S.summary) render();
+  }
+  clearInterval(tick); sumCtrl = null;
+  $('btnSum').textContent='結束並彙整'; $('btnSum').className='primary';
 };
 
 // ---------- export ----------
@@ -327,7 +393,7 @@ $('btnExport').onclick = ()=>{
   a.download='記錄_'+new Date().toISOString().slice(0,10)+'.md'; a.click();
 };
 $('btnCopy').onclick = async ()=>{ try{ await navigator.clipboard.writeText(toMarkdown()); $('btnCopy').textContent='已複製 ✓'; setTimeout(()=>$('btnCopy').textContent='複製全部',1500);}catch(e){$('err').textContent='無法複製，請改用下載'} };
-$('btnClear').onclick = ()=>{ if(confirm('清除本場所有字幕與彙整？（建議先下載）')){ if(listening) stopRec(); S={segs:[],cost:0,summary:'',started:null}; save(); render(); } };
+$('btnClear').onclick = ()=>{ if(confirm('清除本場所有字幕與彙整？（建議先下載）')){ if(listening) stopRec(); S={segs:[],cost:0,summary:'',started:null}; save(); render(); $('sumProgress').style.display='none'; } };
 
 // ---------- tiny markdown renderer ----------
 function md(src){
