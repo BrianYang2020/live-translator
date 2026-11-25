@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>即時字幕翻譯＋會議彙整</title>
+<style>
+  :root{--bg:#f7f6f3;--card:#fff;--ink:#1f2328;--mute:#6b7280;--line:#e5e2dc;--acc:#c2410c;--ok:#15803d;--zh:#0f3d6e}
+  @media (prefers-color-scheme:dark){:root{--bg:#16171a;--card:#1f2125;--ink:#e8e6e1;--mute:#9aa0a6;--line:#33353a;--acc:#fb923c;--ok:#4ade80;--zh:#93c5fd}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 -apple-system,"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif}
+  header{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:10px 14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  h1{font-size:17px;margin:0 auto 0 0}
+  button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:10px;padding:8px 14px;cursor:pointer}
+  button.primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+  button.rec{background:#b91c1c;border-color:#b91c1c;color:#fff}
+  button:disabled{opacity:.45;cursor:default}
+  main{max-width:900px;margin:0 auto;padding:12px 14px 120px}
+  details.settings{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin-bottom:12px}
+  details summary{cursor:pointer;font-weight:600}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+  @media (max-width:600px){.grid{grid-template-columns:1fr}}
+  label{font-size:13px;color:var(--mute);display:block}
+  input,select,textarea{width:100%;font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)}
+  textarea{min-height:60px;resize:vertical}
+  .status{font-size:13px;color:var(--mute);display:flex;gap:14px;flex-wrap:wrap;margin:6px 0 10px}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--mute);margin-right:5px;vertical-align:middle}
+  .dot.on{background:#dc2626;animation:p 1.2s infinite}@keyframes p{50%{opacity:.3}}
+  .seg{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin-bottom:8px}
+  .seg .t{font-size:12px;color:var(--mute)}
+  .seg .en{color:var(--mute);font-size:14.5px}
+  .seg .zh{color:var(--zh);font-size:17px;font-weight:500;margin-top:4px}
+  .seg .zh.wait{color:var(--mute);font-style:italic;font-weight:400;font-size:14px}
+  #live{border-style:dashed}
+  #live .en{color:var(--ink)}
+  #summary{background:var(--card);border:2px solid var(--acc);border-radius:12px;padding:6px 18px 14px;margin-top:16px;display:none}
+  #summary h2{font-size:18px;margin:14px 0 6px}#summary h3{font-size:16px;margin:12px 0 4px}
+  #summary table{border-collapse:collapse;width:100%;font-size:14.5px}#summary td,#summary th{border:1px solid var(--line);padding:5px 7px;text-align:left;vertical-align:top}
+  #summary ul{padding-left:20px}
+  .bar{position:fixed;left:0;right:0;bottom:0;background:var(--bg);border-top:1px solid var(--line);padding:10px 14px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+  .err{color:#dc2626;font-size:13px}
+  .langs{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .langs button{border:0;border-radius:0;padding:8px 11px}
+  .langs button.on{background:var(--ink);color:var(--bg);font-weight:600}
+  .tag{display:inline-block;font-size:11px;border:1px solid var(--line);border-radius:6px;padding:0 5px;margin-left:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🎙 即時字幕翻譯＋會議彙整</h1>
+  <span class="langs" title="講者換語言時點一下">
+    <button data-l="en">EN</button><button data-l="zh-TW">中文</button><button data-l="ms-MY">Malay</button>
+  </span>
+  <button id="btnRec" class="primary">開始聆聽</button>
+</header>
+
+<main>
+<details class="settings" id="settingsBox">
+  <summary>設定（第一次使用請填 API Key）</summary>
+  <div class="grid">
+    <div><label>Anthropic API Key（只存在這台裝置的瀏覽器）</label><input id="apiKey" type="password" placeholder="sk-ant-..."></div>
+    <div><label>英文口音（按 EN 時使用）</label>
+      <select id="lang">
+        <option value="en-IN">英文（印度口音）en-IN</option>
+        <option value="en-US">英文（美國）en-US</option>
+        <option value="en-GB">英文（英國）en-GB</option>
+        <option value="en-SG">英文（新加坡）en-SG</option>
+        <option value="en-AU">英文（澳洲）en-AU</option>
+      </select></div>
+    <div><label>即時翻譯模型</label>
+      <select id="mTrans">
+        <option value="claude-haiku-5-5">Haiku 5.5（最省，約 US$0.1／小時）</option>
+        <option value="claude-sonnet-5-5">Sonnet 5.5（更順，約 US$1／小時）</option>
+      </select></div>
+    <div><label>最後彙整模型</label>
+      <select id="mSum">
+        <option value="claude-opus-5-5">Opus 5.5（最強，每次約 US$0.1–0.3）</option>
+        <option value="claude-sonnet-5-5">Sonnet 5.5</option>
+        <option value="claude-haiku-5-5">Haiku 5.5</option>
+      </select></div>
+    <div><label>場合</label>
+      <select id="mode">
+        <option value="auto">自動判斷</option>
+        <option value="talk">演講／研討會</option>
+        <option value="meeting">會議討論（要待辦事項）</option>
+      </select></div>
+    <div><label>講者背景（多語夾雜提示）</label>
+      <select id="mixHint">
+        <option value="none">一般（純英文）</option>
+        <option value="sgmy">新加坡／馬來西亞（可能夾中文、馬來文、福建話、粵語）</option>
+        <option value="in">印度（可能夾印地語等）</option>
+      </select></div>
+    <div><label>每段送翻譯的長度（字數，越短越即時）</label><input id="chunkWords" type="number" min="8" max="80" value="25"></div>
+    <div style="grid-column:1/-1"><label>主題／專有名詞提示（幫忙修正辨識錯字，例如：Google Cloud, Gemini, Vertex AI, BigQuery）</label><textarea id="glossary" placeholder="研討會名稱、講者姓名、產品名稱⋯"></textarea></div>
+  </div>
+</details>
+
+<div class="status">
+  <span><span class="dot" id="dot"></span><span id="recState">未聆聽</span></span>
+  <span>段落：<b id="nSeg">0</b></span>
+  <span>本場花費：約 US$<b id="cost">0.000</b></span>
+  <span>本月累計：約 US$<b id="costMonth">0.00</b></span>
+  <span class="err" id="err"></span>
+</div>
+
+<div id="segs"></div>
+<div class="seg" id="live" style="display:none"><div class="t">辨識中⋯</div><div class="en" id="liveEn"></div></div>
+<div id="summary"></div>
+</main>
+
+<button id="btnLatest" onclick="scrollBottom(true)" style="display:none;position:fixed;right:16px;bottom:78px;z-index:6;border-radius:20px;box-shadow:0 2px 8px rgba(0,0,0,.25)">⬇ 跳到最新</button>
+<div class="bar">
+  <button id="btnSum" class="primary">結束並彙整</button>
+  <button id="btnExport">下載 Markdown</button>
+  <button id="btnCopy">複製全部</button>
+  <button id="btnClear">清除本場</button>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const PRICE = { // US$ per 1M tokens [input, output]
+  'claude-haiku-5-5':[0.10,0.50], 'claude-sonnet-5-5':[2,10], 'claude-opus-5-5':[4,20]
+};
+const SETTINGS = ['apiKey','lang','mTrans','mSum','mode','mixHint','chunkWords','glossary'];
+const LANG_NAME = {'zh-TW':'中文','ms-MY':'馬來文'};
+const MIX = {
+  none:'',
+  sgmy:`講者是新加坡／馬來西亞人，常在英文中夾雜華語、馬來文、福建話、粵語與 Singlish 語助詞（lah、leh、meh、lor）。英文辨識器會把非英文的詞誤拼成發音相近的英文字，請依發音與上下文還原原意（例如 "chop" 佔位、"makan" 吃、"kiasu" 怕輸、"paiseh" 不好意思）。`,
+  in:`講者是印度人，可能在英文中夾雜印地語等詞彙，英文辨識器會把這些詞誤拼成發音相近的英文字，請依發音與上下文還原原意。`
+};
+function mixRule(){ const m = MIX[$('mixHint').value]; return m ? m + '\n真的無法判斷的片段，譯文中標示〔聽不清〕，不要硬猜。' : ''; }
+
+// ---------- state ----------
+let S = load('lt_session') || {segs:[], cost:0, summary:'', started:null};
+let pending = '';          // finalized English not yet sent
+let pendingSince = 0;
+let listening = false, rec = null, flushTimer = null;
+let queue = Promise.resolve();
+
+function load(k){ try{return JSON.parse(localStorage.getItem(k))}catch(e){return null} }
+function save(){ try{localStorage.setItem('lt_session', JSON.stringify(S))}catch(e){} }
+function monthKey(){ const d=new Date(); return 'lt_cost_'+d.getFullYear()+'_'+(d.getMonth()+1); }
+
+SETTINGS.forEach(id=>{
+  const v = localStorage.getItem('lt_'+id); if(v!==null) $(id).value=v;
+  $(id).addEventListener('change',()=>{ try{localStorage.setItem('lt_'+id,$(id).value)}catch(e){} });
+});
+if(!$('apiKey').value) $('settingsBox').open = true;
+
+// ---------- 一鍵切換辨識語言 ----------
+let curLang = localStorage.getItem('lt_curLang') || 'zh-TW';   // 預設中文；'en' = 用設定裡選的英文口音；會記住上次選的
+const realLang = ()=> curLang==='en' ? $('lang').value : curLang;
+function paintLangs(){ document.querySelectorAll('.langs button').forEach(b=>b.classList.toggle('on', b.dataset.l===curLang)); }
+document.querySelectorAll('.langs button').forEach(b=> b.onclick = ()=>{
+  if(b.dataset.l===curLang) return;
+  curLang = b.dataset.l; paintLangs();
+  try{ localStorage.setItem('lt_curLang', curLang); }catch(e){}
+  if(listening){
+    flush();                                  // 前一種語言的內容先送出
+    $('recState').textContent='聆聽中（'+realLang()+'）';
+    try{ rec.abort(); }catch(e){}             // onend 會用新語言自動重啟
+  }
+});
+$('lang').addEventListener('change', ()=>{ if(listening && curLang==='en'){ try{rec.abort()}catch(e){} } });
+paintLangs();
+
+// ---------- rendering ----------
+function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function render(){
+  $('segs').innerHTML = S.segs.map((g,i)=>`<div class="seg"><div class="t">${g.time}${LANG_NAME[g.lang]?'<span class="tag">'+LANG_NAME[g.lang]+'</span>':''}</div>
+    <div class="en">${esc(g.en)}</div>
+    <div class="zh ${g.zh?'':'wait'}">${g.zh?esc(g.zh):(g.err?'⚠ 翻譯失敗：'+esc(g.err):'翻譯中⋯')}</div></div>`).join('');
+  $('nSeg').textContent = S.segs.length;
+  $('cost').textContent = S.cost.toFixed(3);
+  $('costMonth').textContent = (+localStorage.getItem(monthKey())||0).toFixed(2);
+  if(S.summary){ $('summary').style.display='block'; $('summary').innerHTML = md(S.summary); }
+  else $('summary').style.display='none';
+}
+// 自動跟隨：使用者停在底部附近才自動捲；往上翻看舊字幕時不打擾，並顯示「跳到最新」
+let follow = true;
+function nearBottom(){ return window.innerHeight + window.scrollY >= document.body.scrollHeight - 160; }
+window.addEventListener('scroll', ()=>{ follow = nearBottom(); $('btnLatest').style.display = (follow||!listening)?'none':'block'; }, {passive:true});
+function scrollBottom(force){
+  if(!force && !follow) return;
+  window.scrollTo({top:document.body.scrollHeight, behavior:'auto'});
+  follow = true; $('btnLatest').style.display='none';
+}
+
+// ---------- Claude API ----------
+async function claude(model, system, user, maxTokens){
+  const key = $('apiKey').value.trim();
+  if(!key) throw new Error('請先在設定填入 API Key');
+  const r = await fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01',
+             'anthropic-dangerous-direct-browser-access':'true'},
+    body: JSON.stringify({model, max_tokens:maxTokens, system, messages:[{role:'user',content:user}]})
+  });
+  const j = await r.json();
+  if(!r.ok) throw new Error(j.error?.message || ('HTTP '+r.status));
+  const p = PRICE[model] || [0,0];
+  const c = (j.usage.input_tokens*p[0] + j.usage.output_tokens*p[1])/1e6;
+  S.cost += c;
+  try{ localStorage.setItem(monthKey(), ((+localStorage.getItem(monthKey())||0)+c).toString()); }catch(e){}
+  return j.content.map(b=>b.text||'').join('').trim();
+}
+
+function translate(seg){
+  const ctx = S.segs.slice(Math.max(0,S.segs.indexOf(seg)-2), S.segs.indexOf(seg)).map(g=>g.en).join(' ');
+  const gl = $('glossary').value.trim();
+  const src = seg.lang==='zh-TW' ? '這段是中文（華語）的語音辨識稿，請修正同音錯字、整理成通順的台灣繁體中文（簡體轉繁體）'
+            : seg.lang==='ms-MY' ? '這段是馬來文的語音辨識稿，請翻成台灣繁體中文'
+            : '這段是英文的語音辨識稿，請翻成台灣繁體中文';
+  const sys = `你是同步口譯員。${src}。
+- 辨識稿可能因口音而有錯字或斷句錯誤，請依上下文推斷講者原意再翻譯。
+- 產品名、技術名詞保留英文原文（例如 Gemini、Vertex AI）。
+- 只輸出這一段的中文譯文，不要解釋、不要加引號、不要重複前文。
+${mixRule()}
+${gl?'主題與專有名詞：'+gl:''}`;
+  const user = (ctx?`【前文，僅供理解，不要翻】${ctx}\n\n`:'') + `【請翻譯這段】${seg.en}`;
+  queue = queue.then(async()=>{
+    try{ seg.zh = await claude($('mTrans').value, sys, user, 600); seg.err=null; }
+    catch(e){ seg.err = e.message; $('err').textContent = e.message; }
+    save(); render(); scrollBottom();
+  });
+}
+
+function flush(){
+  const text = pending.trim(); pending = '';
+  if(!text) return;
+  const seg = {time:new Date().toLocaleTimeString('zh-TW',{hour12:false}), en:text, zh:'', lang:curLang};
+  S.segs.push(seg); save(); render(); scrollBottom();
+  translate(seg);
+}
+
+// ---------- speech recognition ----------
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+function startRec(){
+  if(!SR){ $('err').textContent='這個瀏覽器不支援語音辨識，請用 Chrome（電腦或 Android）或 iPhone Safari'; return; }
+  if(!$('apiKey').value.trim()){ $('settingsBox').open=true; $('err').textContent='請先填 API Key'; return; }
+  $('err').textContent='';
+  if(!S.started) S.started = new Date().toISOString();
+  rec = new SR(); rec.lang = realLang(); rec.continuous = true; rec.interimResults = true;
+  rec.onresult = e=>{
+    let interim='';
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      const t = e.results[i][0].transcript;
+      if(e.results[i].isFinal){
+        if(!pending) pendingSince = Date.now();
+        pending += (pending?' ':'') + t.trim();
+        const words = pending.split(/\s+/).length;
+        if(curLang==='zh-TW' && pending.length >= +$('chunkWords').value*1.5) flush();   // 中文沒有空格，改用字數
+        else if(words >= +$('chunkWords').value && /[.?!]$/.test(pending) || words >= +$('chunkWords').value*1.8) flush();
+      } else interim += t;
+    }
+    $('live').style.display = (pending||interim)?'block':'none';
+    $('liveEn').textContent = (pending+' '+interim).trim();
+    scrollBottom();
+  };
+  rec.onerror = e=>{ if(e.error!=='no-speech' && e.error!=='aborted') $('err').textContent='辨識錯誤：'+e.error; if(e.error==='not-allowed') stopRec(); };
+  rec.onend = ()=>{ if(listening){ try{ rec.lang = realLang(); rec.start(); }catch(e){} } };   // Chrome 靜音後會自動停，這裡自動重啟
+  rec.start(); listening = true;
+  // 停頓 6 秒或累積超過 15 秒就送出，不用等滿字數
+  flushTimer = setInterval(()=>{ if(pending && Date.now()-pendingSince>15000) flush(); }, 1000);
+  rec.onspeechend = ()=> setTimeout(()=>{ if(pending) flush(); }, 6000);
+  $('btnRec').textContent='暫停聆聽'; $('btnRec').className='rec';
+  $('dot').classList.add('on'); $('recState').textContent='聆聽中（'+rec.lang+'）';
+  try{ navigator.wakeLock?.request('screen'); }catch(e){}
+}
+function stopRec(){
+  listening=false; clearInterval(flushTimer);
+  try{rec&&rec.stop()}catch(e){}
+  flush(); $('live').style.display='none';
+  $('btnRec').textContent='繼續聆聽'; $('btnRec').className='primary';
+  $('dot').classList.remove('on'); $('recState').textContent='已暫停';
+}
+$('btnRec').onclick = ()=> listening?stopRec():startRec();
+
+// ---------- summary ----------
+$('btnSum').onclick = async ()=>{
+  if(listening) stopRec();
+  await queue;
+  if(!S.segs.length){ $('err').textContent='還沒有內容'; return; }
+  const mode = $('mode').value;
+  const transcript = S.segs.map(g=>`[${g.time}]${LANG_NAME[g.lang]?'（'+LANG_NAME[g.lang]+'）':''} ${g.en}`).join('\n');
+  const modeHint = mode==='meeting' ? '這是一場會議討論。' : mode==='talk' ? '這是一場演講／研討會。' :
+    '請先判斷這是「演講／研討會」還是「會議討論」（多人來回討論、有分工或決議即屬會議）。';
+  const sys = `你是專業的會議與研討會記錄員，用台灣繁體中文、Markdown 撰寫。
+原始稿是語音辨識結果（可能是中文、英文或馬來文，未標語言的段落是英文；可能有口音造成的錯字），請依上下文修正理解。技術名詞保留英文。
+${mixRule()}
+${$('glossary').value.trim()?'主題與專有名詞：'+$('glossary').value.trim():''}`;
+  const user = `${modeHint}
+請依下列結構整理（沒有內容的段落寫「無」，不要編造原稿沒有的資訊）：
+
+## 類型
+演講／研討會 或 會議討論（一句話說明判斷依據）
+## 一句話總結
+## 重點摘要
+依主題分 3–7 個小節（### 小標），每節條列重點，保留關鍵數字、產品名、案例。
+## 值得追蹤的資源與名詞
+講者提到的工具、網址、論文、產品，附一句說明。
+## 待辦事項
+若為會議：用表格「| 事項 | 負責人 | 期限 | 依據（原話時間） |」，負責人或期限原稿沒說就寫「未指定」。
+若為演講：列出聽眾可以採取的後續行動（例如去試用某工具），一樣用表格但負責人寫「我」。
+## 決議與共識
+（會議才需要）
+## 待釐清問題
+辨識不清、講者沒講完、需要會後確認的地方。
+
+原始逐字稿：
+${transcript}`;
+  $('btnSum').disabled=true; $('btnSum').textContent='彙整中⋯';
+  try{ S.summary = await claude($('mSum').value, sys, user, 6000); save(); render(); $('summary').scrollIntoView({behavior:'smooth'}); }
+  catch(e){ $('err').textContent='彙整失敗：'+e.message; }
+  $('btnSum').disabled=false; $('btnSum').textContent='結束並彙整';
+};
+
+// ---------- export ----------
+function toMarkdown(){
+  const d = S.started? new Date(S.started).toLocaleString('zh-TW',{hour12:false}) : '';
+  return `# 記錄 ${d}\n\n${S.summary||'（尚未彙整）'}\n\n---\n\n## 逐段中英對照\n\n` +
+    S.segs.map(g=>`**${g.time}**\n\n> ${g.en}\n\n${g.zh||''}\n`).join('\n');
+}
+$('btnExport').onclick = ()=>{
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([toMarkdown()],{type:'text/markdown'}));
+  a.download='記錄_'+new Date().toISOString().slice(0,10)+'.md'; a.click();
+};
+$('btnCopy').onclick = async ()=>{ try{ await navigator.clipboard.writeText(toMarkdown()); $('btnCopy').textContent='已複製 ✓'; setTimeout(()=>$('btnCopy').textContent='複製全部',1500);}catch(e){$('err').textContent='無法複製，請改用下載'} };
+$('btnClear').onclick = ()=>{ if(confirm('清除本場所有字幕與彙整？（建議先下載）')){ if(listening) stopRec(); S={segs:[],cost:0,summary:'',started:null}; save(); render(); } };
+
+// ---------- tiny markdown renderer ----------
+function md(src){
+  const lines = src.split('\n'); let out='', inList=false, inTable=false;
+  const inline = s=>esc(s).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/`(.+?)`/g,'<code>$1</code>')
+    .replace(/\[(.+?)\]\((https?:[^)]+)\)/g,'<a href="$2" target="_blank">$1</a>');
+  const close=()=>{ if(inList){out+='</ul>';inList=false} if(inTable){out+='</table>';inTable=false} };
+  for(const l of lines){
+    if(/^\|/.test(l)){
+      if(/^\|[\s\-:|]+\|$/.test(l)) continue;
+      if(!inTable){ close(); out+='<table>'; inTable=true;
+        out+='<tr>'+l.split('|').slice(1,-1).map(c=>'<th>'+inline(c.trim())+'</th>').join('')+'</tr>'; continue; }
+      out+='<tr>'+l.split('|').slice(1,-1).map(c=>'<td>'+inline(c.trim())+'</td>').join('')+'</tr>'; continue;
+    }
+    if(/^\s*[-*] /.test(l)){ if(inTable){out+='</table>';inTable=false} if(!inList){out+='<ul>';inList=true} out+='<li>'+inline(l.replace(/^\s*[-*] /,''))+'</li>'; continue; }
+    close();
+    let m;
+    if(m=l.match(/^### (.*)/)) out+='<h3>'+inline(m[1])+'</h3>';
+    else if(m=l.match(/^## (.*)/)) out+='<h2>'+inline(m[1])+'</h2>';
+    else if(m=l.match(/^# (.*)/)) out+='<h2>'+inline(m[1])+'</h2>';
+    else if(l.trim()) out+='<p>'+inline(l)+'</p>';
+  }
+  close(); return out;
+}
+
+render();
+</script>
+</body>
+</html>
