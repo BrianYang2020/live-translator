@@ -41,6 +41,9 @@
   .err{color:#dc2626;font-size:13px}
   #sumProgress{display:none;background:var(--card);border:1px solid var(--acc);border-radius:12px;padding:10px 14px;margin-top:16px;font-size:15px}
   .mute{color:var(--mute);font-size:13px}
+  .meter{display:inline-block;width:70px;height:8px;border-radius:4px;background:var(--line);vertical-align:middle;overflow:hidden}
+  .meter i{display:block;height:100%;width:0;background:var(--ok);transition:width .1s}
+  #micWarn{display:none;background:#fef3c7;color:#78350f;border:1px solid #f59e0b;border-radius:10px;padding:8px 12px;margin:0 0 10px;font-size:14px}
   .langs{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
   .langs button{border:0;border-radius:0;padding:8px 11px}
   .langs button.on{background:var(--ink);color:var(--bg);font-weight:600}
@@ -102,8 +105,10 @@
   <span>段落：<b id="nSeg">0</b></span>
   <span>本場花費：約 US$<b id="cost">0.000</b></span>
   <span>本月累計：約 US$<b id="costMonth">0.00</b></span>
+  <span id="micBox" style="display:none">🎤 <span class="meter"><i id="micLvl"></i></span> <span id="micName" class="mute"></span></span>
   <span class="err" id="err"></span>
 </div>
+<div id="micWarn"></div>
 
 <div id="segs"></div>
 <div class="seg" id="live" style="display:none"><div class="t">辨識中⋯</div><div class="en" id="liveEn"></div></div>
@@ -271,6 +276,42 @@ function flush(){
   translate(seg);
 }
 
+// ---------- 麥克風檢查 ----------
+// 手機／平板上同時開兩個麥克風串流可能讓語音辨識失效，所以音量條只在電腦上開；
+// 「多久沒收到聲音」的提醒則所有裝置都有（用語音辨識本身的事件判斷）。
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints>1 && /Macintosh/.test(navigator.userAgent));
+let lastSound = 0, micStream = null, micCtx = null, micRAF = 0;
+const MIC_HELP = isMobile ? '請確認瀏覽器有麥克風權限，並靠近講者或喇叭。'
+  : 'Chrome 可能選到虛擬或沒接上的麥克風：網址列輸入 <b>chrome://settings/content/microphone</b>，把最上方的麥克風改成內建麥克風，再重新開始聆聽。';
+function heard(){ lastSound = Date.now(); $('micWarn').style.display='none'; }
+function checkSilence(){
+  if(!listening) return;
+  const s = Math.round((Date.now()-lastSound)/1000);
+  if(s >= 10){ $('micWarn').style.display='block'; $('micWarn').innerHTML = `⚠ 已經 <b>${s}</b> 秒沒收到聲音。若講者正在說話，代表麥克風有問題。${MIC_HELP}`; }
+}
+async function startMeter(){
+  if(isMobile || !navigator.mediaDevices?.getUserMedia) return;
+  try{
+    micStream = await navigator.mediaDevices.getUserMedia({audio:true});
+    const tr = micStream.getAudioTracks()[0];
+    $('micBox').style.display='inline'; $('micName').textContent = tr.label;
+    if(/virtual|cast audio|teams|parallels|blackhole|zoom|loopback/i.test(tr.label)){
+      $('micWarn').style.display='block';
+      $('micWarn').innerHTML = `⚠ 目前用的麥克風是「<b>${esc(tr.label)}</b>」，這通常是虛擬裝置，收不到現場聲音。${MIC_HELP}`;
+    }
+    micCtx = new AudioContext(); const an = micCtx.createAnalyser(); an.fftSize = 1024;
+    micCtx.createMediaStreamSource(micStream).connect(an);
+    const buf = new Float32Array(an.fftSize);
+    const loop = ()=>{ an.getFloatTimeDomainData(buf); let pk=0; for(const v of buf) pk=Math.max(pk,Math.abs(v));
+      $('micLvl').style.width = Math.min(100, pk*250)+'%'; if(pk>0.03) heard(); micRAF = requestAnimationFrame(loop); };
+    loop();
+  }catch(e){}
+}
+function stopMeter(){
+  cancelAnimationFrame(micRAF); try{ micStream?.getTracks().forEach(t=>t.stop()); micCtx?.close(); }catch(e){}
+  micStream = micCtx = null; $('micBox').style.display='none'; $('micWarn').style.display='none';
+}
+
 // ---------- speech recognition ----------
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 function startRec(){
@@ -279,7 +320,9 @@ function startRec(){
   $('err').textContent='';
   if(!S.started) S.started = new Date().toISOString();
   rec = new SR(); rec.lang = realLang(); rec.continuous = true; rec.interimResults = true;
+  rec.onsoundstart = heard;
   rec.onresult = e=>{
+    heard();
     let interim='';
     for(let i=e.resultIndex;i<e.results.length;i++){
       const t = e.results[i][0].transcript;
@@ -297,16 +340,16 @@ function startRec(){
   };
   rec.onerror = e=>{ if(e.error!=='no-speech' && e.error!=='aborted') $('err').textContent='辨識錯誤：'+e.error; if(e.error==='not-allowed') stopRec(); };
   rec.onend = ()=>{ if(listening){ try{ rec.lang = realLang(); rec.start(); }catch(e){} } };   // Chrome 靜音後會自動停，這裡自動重啟
-  rec.start(); listening = true;
+  rec.start(); listening = true; lastSound = Date.now(); startMeter();
   // 停頓 6 秒或累積超過 15 秒就送出，不用等滿字數
-  flushTimer = setInterval(()=>{ if(pending && Date.now()-pendingSince>15000) flush(); }, 1000);
+  flushTimer = setInterval(()=>{ if(pending && Date.now()-pendingSince>15000) flush(); checkSilence(); }, 1000);
   rec.onspeechend = ()=> setTimeout(()=>{ if(pending) flush(); }, 6000);
   $('btnRec').textContent='暫停聆聽'; $('btnRec').className='rec';
   $('dot').classList.add('on'); $('recState').textContent='聆聽中（'+rec.lang+'）';
   try{ navigator.wakeLock?.request('screen'); }catch(e){}
 }
 function stopRec(){
-  listening=false; clearInterval(flushTimer);
+  listening=false; clearInterval(flushTimer); stopMeter();
   try{rec&&rec.stop()}catch(e){}
   flush(); $('live').style.display='none';
   $('btnRec').textContent='繼續聆聽'; $('btnRec').className='primary';
